@@ -501,16 +501,13 @@ void DeadArgumentEliminationPass::SurveyFunction(const Function &F) {
   unsigned RetCount = NumRetVals(&F);
 
   // Assume all return values are dead
-  using RetVals = SmallVector<Liveness, 5>;
-
-  RetVals RetValLiveness(RetCount, MaybeLive);
-
-  using RetUses = SmallVector<UseVector, 5>;
+  Livenesses RetValLiveness(RetCount, MaybeLive);
+  UseVector RetValues;
 
   // These vectors map each return value to the uses that make it MaybeLive, so
   // we can add those to the Uses map if the return value really turns out to be
   // MaybeLive. Initialized to a list of RetCount empty lists.
-  RetUses MaybeLiveRetUses(RetCount);
+  RetOrArgUses MaybeLiveRetUses(RetCount);
 
   bool HasMustTailCalls = false;
 
@@ -607,18 +604,23 @@ void DeadArgumentEliminationPass::SurveyFunction(const Function &F) {
   }
 
   // Now we've inspected all callers, record the liveness of our return values.
-  for (unsigned Ri = 0; Ri != RetCount; ++Ri)
-    MarkValue(CreateRet(&F, Ri), RetValLiveness[Ri], MaybeLiveRetUses[Ri]);
+  for (unsigned Ri = 0; Ri != RetCount; ++Ri) {
+    RetValues.push_back(CreateRet(&F, Ri));
+  }
+  MarkValues(RetValues, RetValLiveness, MaybeLiveRetUses);
 
   LLVM_DEBUG(dbgs() << "DeadArgumentEliminationPass - Inspecting args for fn: "
                     << F.getName() << "\n");
 
   // Now, check all of our arguments.
   unsigned ArgI = 0;
-  UseVector MaybeLiveArgUses;
+  UseVector ArgValues;
+  RetOrArgUses MaybeLiveArgUses;
+  Livenesses ArgLivenesses;
   for (Function::const_arg_iterator AI = F.arg_begin(), E = F.arg_end();
        AI != E; ++AI, ++ArgI) {
     Liveness Result;
+    UseVector ArgUses;
     if (F.getFunctionType()->isVarArg() || HasMustTailCallers ||
         HasMustTailCalls) {
       // Variadic functions will already have a va_arg function expanded inside
@@ -636,32 +638,65 @@ void DeadArgumentEliminationPass::SurveyFunction(const Function &F) {
     } else {
       // See what the effect of this use is (recording any uses that cause
       // MaybeLive in MaybeLiveArgUses).
-      Result = SurveyUses(&*AI, MaybeLiveArgUses);
+      Result = SurveyUses(&*AI, ArgUses);
     }
 
-    // Mark the result.
-    MarkValue(CreateArg(&F, ArgI), Result, MaybeLiveArgUses);
-    // Clear the vector again for the next iteration.
-    MaybeLiveArgUses.clear();
+    ArgValues.push_back(std::move(CreateArg(&F, ArgI)));
+    ArgLivenesses.push_back(Result);
+    MaybeLiveArgUses.push_back(ArgUses);
   }
+  MarkValues(ArgValues, ArgLivenesses, MaybeLiveArgUses);
 }
 
-/// MarkValue - This function marks the liveness of RA depending on L. If L is
-/// MaybeLive, it also takes all uses in MaybeLiveUses and records them in Uses,
-/// such that RA will be marked live if any use in MaybeLiveUses gets marked
-/// live later on.
-void DeadArgumentEliminationPass::MarkValue(const RetOrArg &RA, Liveness L,
-                                            const UseVector &MaybeLiveUses) {
-  switch (L) {
+/// MarkValues - This function marks the liveness of each value in RetOrArgs
+/// depending on their corresponding livness L in Lives.
+/// This is done in two passes:
+//
+/// First, all RA values that have an L of MaybeLive have their corresponding
+/// uses in RetOrArgUses recorded in Uses, such that RA will be marked live if
+/// any use in MaybeLiveUses gets marked live later on.
+//
+// Second, we call MarkLive for all RA values that have an L of Live.
+// This is done as a separate step so that any MaybeLive dependencies have
+// been recorded in Uses, to be read by MarkLive.
+void DeadArgumentEliminationPass::MarkValues(const UseVector &RetOrArgs,
+                                             Livenesses &Lives,
+                                             const RetOrArgUses &RetOrArgUses) {
+  for (unsigned i = 0; i < RetOrArgs.size(); i++) {
+    const auto RA = RetOrArgs[i];
+    const auto L = Lives[i];
+    const auto MaybeLiveUses = RetOrArgUses[i];
+
+    switch (L) {
+    // Don't do anything yet - we will mark these as live in the
+    // second pass, after we have recorded all MaybeLive dependencies
+    // in Uses
     case Live:
-      MarkLive(RA);
       break;
     case MaybeLive:
       // Note any uses of this value, so this return value can be
       // marked live whenever one of the uses becomes live.
-      for (const auto &MaybeLiveUse : MaybeLiveUses)
-        Uses.insert(std::make_pair(MaybeLiveUse, RA));
+      for (const auto &Use : MaybeLiveUses) {
+        assert(!(LiveFunctions.count(Use.F) || LiveValues.count(Use)) &&
+               "Use is already live!");
+        Uses.insert(std::make_pair(Use, RA));
+      }
       break;
+    }
+  }
+
+  for (unsigned i = 0; i < RetOrArgs.size(); i++) {
+    const auto RA = RetOrArgs[i];
+    const auto L = Lives[i];
+
+    switch (L) {
+    case Live:
+      MarkLive(RA);
+      break;
+    // Handled in the first pass
+    case MaybeLive:
+      break;
+    }
   }
 }
 

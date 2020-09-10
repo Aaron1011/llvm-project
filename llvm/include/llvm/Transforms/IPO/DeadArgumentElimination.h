@@ -117,6 +117,9 @@ public:
 
   using UseVector = SmallVector<RetOrArg, 5>;
 
+  using Livenesses = SmallVector<Liveness, 5>;
+  using RetOrArgUses = SmallVector<UseVector, 5>;
+
   /// This allows this pass to do double-duty as the dead arg hacking pass
   /// (used only by bugpoint).
   bool ShouldHackArguments = false;
@@ -128,8 +131,8 @@ private:
   Liveness SurveyUses(const Value *V, UseVector &MaybeLiveUses);
 
   void SurveyFunction(const Function &F);
-  void MarkValue(const RetOrArg &RA, Liveness L,
-                 const UseVector &MaybeLiveUses);
+  void MarkValues(const UseVector &RetOrArgs, Livenesses &L,
+                  const RetOrArgUses &RetOrArgUses);
   void MarkLive(const RetOrArg &RA);
   void MarkLive(const Function &F);
   void PropagateLiveness(const RetOrArg &RA);
